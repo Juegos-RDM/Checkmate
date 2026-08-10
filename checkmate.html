@@ -4346,7 +4346,7 @@ const CDN2= 'https://images.chesscomfiles.com/chess-themes/pieces/neo/150/';
 // ═══════════════════════════════════════════════════════
 // STOCKFISH SETUP
 // ═══════════════════════════════════════════════════════
-let sf=null, sfOk=false, sfCb=null, _engineNoticeShown=false;
+let sf=null, sfOk=false, sfCb=null, sfAnalyzeCb=null, lastEvalCp=null, lastEvalMate=null, _engineNoticeShown=false;
 function showEngineServerNotice(){
   if(_engineNoticeShown)return;_engineNoticeShown=true;
   setTimeout(()=>addMsg('prof','⚠ No pude cargar el motor Stockfish. Este proyecto ahora usa archivos externos (stockfish-18-lite-single.js/.wasm) por su peso, así que no funciona abriendo el .html con doble clic (protocolo file://).\n\nSírvelo por HTTP, por ejemplo desde esta carpeta:\npython3 -m http.server\n\ny abre http://localhost:8000/checkmate.html — o publícalo con GitHub Pages.\n\nMientras tanto, el resto de la app (puzzles, chat, aperturas, perfiles) funciona con normalidad, solo faltará el oponente IA. ♟'),300);
@@ -4370,12 +4370,28 @@ function initSF(){
         sfOk=true;
         setSF('ready','Motor listo ✓');
       }
-      else if(l.startsWith('bestmove')&&sfCb){
+      else if(l.startsWith('info')){
+        const m=l.match(/\bscore (cp|mate) (-?\d+)/);
+        if(m){
+          const kind=m[1],val=parseInt(m[2],10);
+          const persp=chess.turn()==='w'?1:-1; // UCI score is from side-to-move's view
+          if(kind==='cp'){lastEvalCp=val*persp;lastEvalMate=null;}
+          else{lastEvalMate=val*persp;lastEvalCp=null;}
+          const ef=gEl('efill');if(ef)ef.style.height=getEvalPct()+'%';
+        }
+      }
+      else if(l.startsWith('bestmove')){
         if(window._sfTimeout)clearTimeout(window._sfTimeout);
         const mv=l.split(' ')[1];
-        const c=sfCb;sfCb=null;
-        setSF('ready','Motor listo');
-        c(mv);
+        if(sfAnalyzeCb){
+          const c=sfAnalyzeCb;sfAnalyzeCb=null;
+          setSF('ready','Motor listo');
+          c({cp:lastEvalCp,mate:lastEvalMate,bestmove:mv});
+        }else if(sfCb){
+          const c=sfCb;sfCb=null;
+          setSF('ready','Motor listo');
+          c(mv);
+        }
       }
     };
     sf.onerror=(err)=>{
@@ -4394,6 +4410,23 @@ function setSF(cls,txt){
   const d=document.getElementById('sfdot'),t=document.getElementById('sftxt');
   if(d)d.className=cls;if(t)t.textContent=txt;
 }
+function analyzePosition(movetimeMs,cb){
+  if(!sf||!sfOk){cb(null);return;}
+  if(window._sfTimeout)clearTimeout(window._sfTimeout);
+  sf.postMessage('stop');
+  sf.postMessage('setoption name UCI_LimitStrength value false'); // análisis a fuerza completa, no la del nivel elegido
+  const moves=chess.history({verbose:true}).map(m=>m.from+m.to+(m.promotion||''));
+  sf.postMessage(moves.length?'position startpos moves '+moves.join(' '):'position startpos');
+  lastEvalCp=null;lastEvalMate=null;
+  sfAnalyzeCb=function(res){
+    // Restaura la limitación de fuerza acorde a la dificultad para la próxima jugada del rival
+    sf.postMessage('setoption name UCI_LimitStrength value true');
+    sf.postMessage('setoption name UCI_Elo value '+Math.max(1320,DIFF_ELO[difficulty]));
+    cb(res);
+  };
+  sf.postMessage('go movetime '+movetimeMs);
+}
+
 function askSF(fen,depth,skill,cb){
   if(!sf||!sfOk){cb(null);return;}
   if(window._sfTimeout)clearTimeout(window._sfTimeout);
@@ -4815,6 +4848,14 @@ function renderBoard(){
 }
 
 function getEvalPct(){
+  if(lastEvalMate!==null&&lastEvalMate!==undefined){
+    return lastEvalMate>0?8:92; // mate a favor de blancas o de negras: extremo de la barra
+  }
+  if(lastEvalCp!==null&&lastEvalCp!==undefined){
+    const pct=50-50*Math.tanh(lastEvalCp/350);
+    return Math.max(8,Math.min(92,pct));
+  }
+  // Sin evaluación del motor todavía (recién empieza la partida, o motor no disponible): heurística de material
   let w=0,b=0;
   chess.board().forEach(row=>row.forEach(pc=>{if(!pc)return;const v=PVAL[pc.type]||0;if(pc.color==='w')w+=v;else b+=v;}));
   const tot=w+b||1;return Math.max(8,Math.min(92,(b/tot)*100));
@@ -4960,6 +5001,7 @@ function newGame(){
   chess.reset();selected=null;legalDests=[];lastMove=null;
   gameOver=false;isThinking=false;
   clockHistory=[];
+  lastEvalCp=null;lastEvalMate=null;
   // Clear any pending engine search
   sfSearchId++;
   sfCb=null;
@@ -4991,6 +5033,7 @@ function undoMove(){
   }
   renderClocks();
   selected=null;legalDests=[];gameOver=false;isThinking=false;
+  lastEvalCp=null;lastEvalMate=null;
   var hv=chess.history({verbose:true});
   lastMove=hv.length?{from:hv[hv.length-1].from,to:hv[hv.length-1].to}:null;
   renderBoard();updateHist();setStatus('Tu turno — Blancas',false);
@@ -5209,8 +5252,28 @@ async function reqAnalysis(){
   isAITyping=false;
   const h=chess.history().join(' ');
   if(!h){addMsg('prof','¡Juega primero para analizar! ♟');return;}
+  if(isThinking){addMsg('prof','Dame un segundo, estoy pensando mi jugada. ♟');return;}
   addMsg('user','🔍 Solicitar análisis...');
-  await aiChat(`Analiza brevemente: ${h}. Señala 1 error y 1 jugada destacada.`);
+  if(sf&&sfOk){
+    setSF('thinking','Analizando...');
+    analyzePosition(1500,(res)=>{
+      setSF('ready','Motor listo');
+      let evalTxt='Sin datos del motor.';
+      if(res){
+        if(res.mate!==null&&res.mate!==undefined){
+          evalTxt=res.mate>0?`♟ Mate en ${Math.abs(res.mate)} a favor de las blancas.`:`♟ Mate en ${Math.abs(res.mate)} a favor de las negras.`;
+        }else if(res.cp!==null&&res.cp!==undefined){
+          const pawns=(res.cp/100).toFixed(1);
+          evalTxt=`♟ Evaluación de Stockfish: ${res.cp>0?'+':''}${pawns} (${res.cp>30?'ventaja blanca':res.cp<-30?'ventaja negra':'posición equilibrada'}).`;
+        }
+        if(res.bestmove)evalTxt+=` Mejor jugada según el motor: ${res.bestmove}.`;
+      }
+      addMsg('prof',evalTxt);
+      aiChat(`Analiza brevemente esta partida: ${h}. Dato real del motor: ${evalTxt} Usa ese dato como referencia real y señala 1 error y 1 jugada destacada del jugador humano (blancas).`);
+    });
+  }else{
+    await aiChat(`Analiza brevemente: ${h}. Señala 1 error y 1 jugada destacada.`);
+  }
 }
 
 // ═══════════════════════════════════════════════════════
@@ -5663,6 +5726,33 @@ function handlePuzClick(sq){
         }else{const st=gEl('puzstxt');if(st){st.textContent='✓ Bien — continúa la secuencia';st.className='ok';}}
         renderPuzBoard();
       }else{
+        // No coincide con la solución registrada — pero si la jugada es legal
+        // y da jaque mate de verdad, es una solución válida aunque no sea la
+        // que quedó guardada (puede haber más de una forma de dar mate).
+        const tentative={from:puzSel,to:sq};
+        const legalHere=puzChess.moves({square:puzSel,verbose:true}).find(m=>m.to===sq);
+        if(legalHere&&legalHere.promotion)tentative.promotion=legalHere.promotion;
+        const testFen=puzChess.fen();
+        const testChess=new Chess(testFen);
+        const testResult=testChess.move(tentative);
+        const deliversMate=testResult&&testChess.isCheckmate();
+        if(deliversMate){
+          const pmr=puzChess.move(tentative);
+          puzLM={from:puzSel,to:sq};
+          markPuzStep(puzStep,true);
+          puzSolved=true;puzStep=puz.solution.length;puzSel=null;puzLegal=[];
+          const pts=Math.max(20,puz.points-puzHints*30);
+          puzSesScore+=pts;puzTotScore+=pts;
+          const sc=gEl('puz-score');if(sc)sc.textContent=puzSesScore;
+          const pt=gEl('puz-total');if(pt)pt.textContent=puzTotScore;
+          const st=gEl('puzstxt');if(st){st.textContent=`✅ ¡Jaque mate! Solución alternativa válida. +${pts} puntos`;st.className='ok';}
+          const em=gEl('puz-emoji');if(em)em.textContent='🎉';
+          const nx=gEl('puznext');if(nx)nx.disabled=false;
+          const stars=puzHints===0?3:puzHints===1?2:1;
+          document.querySelectorAll('.pstar').forEach((s,i)=>{if(i<stars)s.classList.add('lit');});
+          renderPuzBoard();
+          return;
+        }
         // WRONG ✗
         puzHints++;
         const st=gEl('puzstxt');if(st){st.textContent='✗ Esa no es la jugada correcta. Intenta de nuevo.';st.className='bad';}
