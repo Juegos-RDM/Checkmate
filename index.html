@@ -4350,10 +4350,16 @@ const CDN2= 'https://images.chesscomfiles.com/chess-themes/pieces/neo/150/';
 // ═══════════════════════════════════════════════════════
 // STOCKFISH SETUP
 // ═══════════════════════════════════════════════════════
-let sf=null, sfOk=false, sfCb=null, sfAnalyzeCb=null, lastEvalCp=null, lastEvalMate=null, _engineNoticeShown=false;
+let sf=null, sfOk=false, sfCb=null, sfAnalyzeCb=null, lastEvalCp=null, lastEvalMate=null, _engineNoticeShown=false, _sfFallbackTried=false;
+function wasmSimdSupported(){
+  try{
+    // Módulo WASM mínimo que usa una instrucción SIMD (v128) — patrón estándar de feature-detection
+    return WebAssembly.validate(new Uint8Array([0,97,115,109,1,0,0,0,1,5,1,96,0,1,123,3,2,1,0,10,10,1,8,0,65,0,253,15,253,98,11]));
+  }catch(e){return false;}
+}
 function showEngineServerNotice(){
   if(_engineNoticeShown)return;_engineNoticeShown=true;
-  setTimeout(()=>addMsg('prof','⚠ No pude cargar el motor Stockfish. Este proyecto ahora usa archivos externos (stockfish-18-lite-single.js/.wasm) por su peso, así que no funciona abriendo el .html con doble clic (protocolo file://).\n\nSírvelo por HTTP, por ejemplo desde esta carpeta:\npython3 -m http.server\n\ny abre http://localhost:8000/checkmate.html — o publícalo con GitHub Pages.\n\nMientras tanto, el resto de la app (puzzles, chat, aperturas, perfiles) funciona con normalidad, solo faltará el oponente IA. ♟'),300);
+  setTimeout(()=>addMsg('prof','⚠ No pude cargar el motor Stockfish en este navegador. Prueba con Chrome, Firefox o Edge actualizados. Y recuerda: este proyecto usa archivos externos por su peso, así que no funciona abriendo el .html con doble clic (protocolo file://) — hace falta servirlo por HTTP.\n\nEjemplo, desde esta carpeta:\npython3 -m http.server\n\ny abre http://localhost:8000/checkmate.html — o publícalo con GitHub Pages.\n\nMientras tanto, el resto de la app (puzzles, chat, aperturas, perfiles) funciona con normalidad, solo faltará el oponente IA. ♟'),300);
 }
 function initSF(){
   if(location.protocol==='file:'){
@@ -4361,8 +4367,12 @@ function initSF(){
     showEngineServerNotice();
     return;
   }
+  const engineFile=wasmSimdSupported()?'stockfish-18-lite-single.js':'stockfish-18-asm.js';
+  startSFWorker(engineFile);
+}
+function startSFWorker(engineFile){
   try{
-    sf=new Worker('stockfish-18-lite-single.js');
+    sf=new Worker(engineFile);
     sf.onmessage=e=>{
       const l=(e.data||'').trim();
       if(l==='uciok') sf.postMessage('isready');
@@ -4399,13 +4409,25 @@ function initSF(){
       }
     };
     sf.onerror=(err)=>{
-      console.error('Stockfish worker error:',err);
+      console.error('Stockfish worker error ('+engineFile+'):',err);
+      if(!_sfFallbackTried&&engineFile!=='stockfish-18-asm.js'){
+        // El build con WASM falló en tiempo real (no solo por falta de SIMD) — reintenta con el build sin WASM
+        _sfFallbackTried=true;
+        try{sf.terminate();}catch(e){}
+        startSFWorker('stockfish-18-asm.js');
+        return;
+      }
       setSF('ready','Motor no disponible');
       showEngineServerNotice();
     };
     sf.postMessage('uci');
   }catch(e){
-    console.error('Stockfish init error:',e);
+    console.error('Stockfish init error ('+engineFile+'):',e);
+    if(!_sfFallbackTried&&engineFile!=='stockfish-18-asm.js'){
+      _sfFallbackTried=true;
+      startSFWorker('stockfish-18-asm.js');
+      return;
+    }
     setSF('ready','Motor no disponible');
     showEngineServerNotice();
   }
