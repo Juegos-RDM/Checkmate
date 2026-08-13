@@ -4373,9 +4373,20 @@ function initSF(){
 function startSFWorker(engineFile){
   try{
     sf=new Worker(engineFile);
+    let handshakeDone=false;
+    // Salvavidas robusto: si en 7s no llegó 'uciok', el motor falló de
+    // alguna forma que el navegador no siempre reporta como error de
+    // Worker (p.ej. un CompileError dentro de una promesa interna del
+    // motor nunca dispara sf.onerror — son mecanismos distintos). Este
+    // timeout no depende de esa señal y detecta el fallo igual.
+    const handshakeTimeout=setTimeout(()=>{
+      if(handshakeDone)return;
+      console.error('Stockfish ('+engineFile+'): no respondió a tiempo, probablemente incompatible con este navegador.');
+      tryFallbackOrGiveUp(engineFile);
+    },7000);
     sf.onmessage=e=>{
       const l=(e.data||'').trim();
-      if(l==='uciok') sf.postMessage('isready');
+      if(l==='uciok'){handshakeDone=true;clearTimeout(handshakeTimeout);sf.postMessage('isready');}
       else if(l==='readyok'){
         sf.postMessage('setoption name Hash value '+DIFF_HASH[difficulty]);
         sf.postMessage('setoption name UCI_LimitStrength value true');
@@ -4410,27 +4421,25 @@ function startSFWorker(engineFile){
     };
     sf.onerror=(err)=>{
       console.error('Stockfish worker error ('+engineFile+'):',err);
-      if(!_sfFallbackTried&&engineFile!=='stockfish-18-asm.js'){
-        // El build con WASM falló en tiempo real (no solo por falta de SIMD) — reintenta con el build sin WASM
-        _sfFallbackTried=true;
-        try{sf.terminate();}catch(e){}
-        startSFWorker('stockfish-18-asm.js');
-        return;
-      }
-      setSF('ready','Motor no disponible');
-      showEngineServerNotice();
+      if(handshakeDone)return; // ya funcionaba; un error posterior no reinicia el motor
+      clearTimeout(handshakeTimeout);
+      tryFallbackOrGiveUp(engineFile);
     };
     sf.postMessage('uci');
   }catch(e){
     console.error('Stockfish init error ('+engineFile+'):',e);
-    if(!_sfFallbackTried&&engineFile!=='stockfish-18-asm.js'){
-      _sfFallbackTried=true;
-      startSFWorker('stockfish-18-asm.js');
-      return;
-    }
-    setSF('ready','Motor no disponible');
-    showEngineServerNotice();
+    tryFallbackOrGiveUp(engineFile);
   }
+}
+function tryFallbackOrGiveUp(engineFile){
+  if(!_sfFallbackTried&&engineFile!=='stockfish-18-asm.js'){
+    _sfFallbackTried=true;
+    try{if(sf)sf.terminate();}catch(e){}
+    startSFWorker('stockfish-18-asm.js');
+    return;
+  }
+  setSF('ready','Motor no disponible');
+  showEngineServerNotice();
 }
 function setSF(cls,txt){
   const d=document.getElementById('sfdot'),t=document.getElementById('sftxt');
