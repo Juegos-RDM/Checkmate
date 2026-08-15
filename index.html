@@ -708,9 +708,13 @@ html,body{height:100%;background:var(--bg);color:var(--w);font-family:var(--fb);
   </div>
 </div>
 <!-- Datos separados del código de interfaz (aperturas, consejos, puzzles) -->
-<script src="openings-data.js"></script>
-<script src="tips-data.js"></script>
-<script src="puzzles-data.js"></script>
+<!-- BUILD_ID: se actualiza en cada entrega para poder verificar en la consola
+     del navegador qué versión está realmente cargada (evita confusiones
+     por caché vieja de GitHub Pages o del propio navegador) -->
+<script>window.CM_BUILD='2026-08-13.1';console.log('Checkmate build:',window.CM_BUILD);</script>
+<script src="openings-data.js?v=20260813.1"></script>
+<script src="tips-data.js?v=20260813.1"></script>
+<script src="puzzles-data.js?v=20260813.1"></script>
 <!-- chess.js (ES2019 compatible, no class fields) -->
 <script>
 var ChessLib = (() => {
@@ -4372,18 +4376,25 @@ function initSF(){
 }
 function startSFWorker(engineFile){
   try{
-    sf=new Worker(engineFile);
+    sf=new Worker(engineFile+'?v='+window.CM_BUILD);
     let handshakeDone=false;
-    // Salvavidas robusto: si en 7s no llegó 'uciok', el motor falló de
-    // alguna forma que el navegador no siempre reporta como error de
-    // Worker (p.ej. un CompileError dentro de una promesa interna del
-    // motor nunca dispara sf.onerror — son mecanismos distintos). Este
+    // Salvavidas robusto: si el motor no contesta a tiempo, asumimos que
+    // falló de alguna forma que el navegador no siempre reporta como
+    // error de Worker (p.ej. un CompileError dentro de una promesa
+    // interna nunca dispara sf.onerror — son mecanismos distintos). Este
     // timeout no depende de esa señal y detecta el fallo igual.
+    // stockfish-18-asm.js pesa ~10MB de JS puro (sin WASM) y en equipos
+    // viejos/lentos puede tardar bastante en compilar — medido: 17-19s
+    // bajo simulación de CPU 8x-15x más lenta. Le damos margen amplio.
+    const timeoutMs=engineFile==='stockfish-18-asm.js'?45000:15000;
+    if(timeoutMs>10000){
+      setTimeout(()=>{if(!handshakeDone&&sf)setSF('thinking','Cargando motor (puede tardar en equipos antiguos)...');},6000);
+    }
     const handshakeTimeout=setTimeout(()=>{
       if(handshakeDone)return;
-      console.error('Stockfish ('+engineFile+'): no respondió a tiempo, probablemente incompatible con este navegador.');
+      console.error('Stockfish ('+engineFile+'): no respondió en '+(timeoutMs/1000)+'s, probablemente incompatible con este navegador.');
       tryFallbackOrGiveUp(engineFile);
-    },7000);
+    },timeoutMs);
     sf.onmessage=e=>{
       const l=(e.data||'').trim();
       if(l==='uciok'){handshakeDone=true;clearTimeout(handshakeTimeout);sf.postMessage('isready');}
